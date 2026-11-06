@@ -1,0 +1,120 @@
+#!/usr/bin/env ruby
+#coding:utf-8
+
+# Copyright (C) 2026 PainPainter Authors
+#
+# 本项目基于 MIT 许可证发布。
+
+#------------------------------------------------------------------------------
+# painpainter —— 命令行绘图工具
+#------------------------------------------------------------------------------
+# 把「网络设备接口关系表」JSON 渲染成矢量图文本：
+#   painpainter dot    -i tables.json -o portmap.dot      Graphviz DOT
+#   painpainter drawio -i tables.json -o portmap.drawio   drawio XML
+#   cat tables.json | painpainter dot > portmap.dot       从 stdin 读、写 stdout
+#
+# 输入 JSON 为接口关系表数组（裸数组，或 {"tables": [...]}），记录支持
+# 键值对象（推荐）与 4 元组数组两种形式，与 MCP 工具的数据格式一致。
+#------------------------------------------------------------------------------
+
+require_relative '../lib/painpainter'
+require 'json'
+
+FORMS = %w[dot drawio].freeze
+
+def usage(io = $stdout, status = 0)
+  io.puts <<~TXT
+    PainPainter #{PainPainter::VERSION} —— 网络设备接口关系图生成器
+
+    用法：
+      painpainter dot     [-i 表.json] [-o 输出.dot]    [--overwrite]   Graphviz DOT
+      painpainter drawio  [-i 表.json] [-o 输出.drawio] [--overwrite]   drawio XML
+      painpainter version
+      painpainter help
+
+    选项：
+      -i, --input FILE    输入 JSON 文件（缺省从 stdin 读取）
+      -o, --output FILE   输出文件（缺省写 stdout）
+          --overwrite     允许覆盖已存在的输出文件
+
+    数据格式（JSON）：
+      [[{"hostname": "SW-A", "portname": "GE1/0/1",
+         "services": "vlan100", "anotherside": "SW-B GE0/0/1"}], ...]
+      每条记录也可用 4 元组：["SW-A", "GE1/0/1", "vlan100", "SW-B GE0/0/1"]
+  TXT
+  exit status
+end
+
+def fail_msg msg
+  warn "错误：#{msg}"
+  exit 1
+end
+
+command = ARGV.shift
+
+if command.nil? || %w[help -h --help].include?(command)
+  usage
+elsif %w[version -v --version].include?(command)
+  puts PainPainter::VERSION
+  exit 0
+elsif !FORMS.include?(command)
+  warn "错误：未知命令 #{command}（可用：#{FORMS.join('、')}；用 painpainter help 查看用法）"
+  exit 1
+end
+
+opts = { input: nil, output: nil, overwrite: false }
+while (arg = ARGV.shift)
+  case arg
+  when '-i', '--input'
+    opts[:input] = ARGV.shift or fail_msg("#{arg} 缺少文件路径")
+  when '-o', '--output'
+    opts[:output] = ARGV.shift or fail_msg("#{arg} 缺少文件路径")
+  when '--overwrite'
+    opts[:overwrite] = true
+  when '-h', '--help'
+    usage
+  else
+    fail_msg("未知参数 #{arg}（用 painpainter help 查看用法）")
+  end
+end
+
+raw =
+  if opts[:input]
+    fail_msg("输入文件不存在：#{opts[:input]}") unless File.exist?(opts[:input])
+    begin
+      File.read(opts[:input], encoding: 'UTF-8')
+    rescue SystemCallError => e
+      fail_msg("读取输入失败：#{e.message}")
+    end
+  else
+    $stdin.set_encoding('UTF-8')
+    $stdin.read
+  end
+fail_msg('输入为空：请用 -i 指定 JSON 文件，或从 stdin 提供数据') if raw.strip.empty?
+
+data =
+  begin
+    JSON.parse(raw)
+  rescue JSON::ParserError, EncodingError => e
+    fail_msg("输入不是合法 JSON：#{e.message.lines.first.to_s.strip}")
+  end
+tables =
+  begin
+    PainPainter.normalize_tables(data.is_a?(Hash) ? data['tables'] : data)
+  rescue ArgumentError => e
+    fail_msg(e.message)
+  end
+
+text = command == 'dot' ? DotPainter.make_portmap(tables) : DrawioPainter.make_portmap(tables)
+
+if opts[:output]
+  begin
+    path = PainPainter.save_text(text, opts[:output], opts[:overwrite])
+  rescue ArgumentError => e
+    fail_msg(e.message)
+  end
+  warn "已生成：#{path}"
+else
+  $stdout.set_encoding('UTF-8')
+  $stdout.write text
+end

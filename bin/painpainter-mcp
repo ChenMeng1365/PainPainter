@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+#coding:utf-8
+
+# Copyright (C) 2026 PainPainter Authors
+#
+# 本项目基于 MIT 许可证发布。
+
+#------------------------------------------------------------------------------
+# painpainter-mcp —— PainPainter MCP 服务器启动器
+#------------------------------------------------------------------------------
+# 启动 stdio 传输的 painpainter MCP 服务器，供 AI 客户端
+# （TeleAgent / MCP Inspector 等）作为子进程调用。
+#
+#   painpainter-mcp            启动服务器（阻塞，stdio 协议）
+#   painpainter-mcp --check    环境自检：Ruby 版本、库加载、绘图冒烟、协议模块
+#   painpainter-mcp --help     查看用法
+#
+# 客户端注册（TeleAgent 工具设置 → MCP 配置）：
+#   {"mcpServers":{"painpainter":{"command":"painpainter-mcp"}}}
+#------------------------------------------------------------------------------
+
+require_relative '../lib/painpainter'
+
+SERVER_PATH = File.expand_path('../mcp/painpainter_mcp_server', __dir__)
+
+def usage(io = $stdout, status = 0)
+  io.puts <<~TXT
+    painpainter-mcp #{PainPainter::VERSION} —— MCP 服务器启动器
+
+    用法：
+      painpainter-mcp            启动 MCP 服务器（stdio，供 AI 客户端调用）
+      painpainter-mcp --check    环境自检后退出
+      painpainter-mcp --help     查看本帮助
+  TXT
+  exit status
+end
+
+def check
+  ok = true
+  report = lambda do|pass, label, detail|
+    puts "#{pass ? 'OK  ' : 'FAIL'} #{label}#{detail ? "：#{detail}" : ''}"
+    ok &&= pass
+  end
+
+  report.call(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.0.0'),
+              'Ruby 版本', RUBY_VERSION)
+  report.call(defined?(PainPainter::VERSION) ? true : false, 'painpainter 库', PainPainter::VERSION)
+
+  smoke = [[['SW-A', 'GE1/0/1', 'vlan100', 'SW-B GE0/0/1']]]
+  dot = DotPainter.make_portmap(smoke)
+  xml = DrawioPainter.make_portmap(smoke)
+  report.call(dot.start_with?('graph G {') && xml.start_with?('<mxfile'),
+              '绘图冒烟', "DOT #{dot.bytesize}B / drawio #{xml.bytesize}B")
+
+  begin
+    require SERVER_PATH
+    tools = PainPainterMCP::TOOL_NAMES
+    report.call(tools.is_a?(Array) && tools.size == 2, 'MCP 协议模块', tools.join(', '))
+  rescue LoadError, StandardError => e
+    report.call(false, 'MCP 协议模块', "#{e.class}: #{e.message}")
+  end
+
+  puts ok ? '自检通过' : '自检未通过'
+  exit(ok ? 0 : 1)
+end
+
+case ARGV.first
+when '--check'
+  check
+when '--help', '-h'
+  usage
+when nil
+  require SERVER_PATH
+  PainPainterMCP.run
+else
+  warn "错误：未知参数 #{ARGV.first}（用 painpainter-mcp --help 查看用法）"
+  exit 1
+end
